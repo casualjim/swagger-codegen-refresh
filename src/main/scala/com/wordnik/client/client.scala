@@ -191,7 +191,7 @@ class Client(baseUrl: String, clientConfig: AsyncHttpClientConfig) {
 
   import Client._
   import Client.StringHttpMethod._
-  private implicit val execContext = ExecutionContext.fromExecutorService(clientConfig.executorService())
+  implicit val execContext = ExecutionContext.fromExecutorService(clientConfig.executorService())
 
   private val mimes = new Mimes {
     protected def warn(message: String) = System.err.println("[WARN] " + message)
@@ -239,33 +239,6 @@ class Client(baseUrl: String, clientConfig: AsyncHttpClientConfig) {
   }
 
   private val allowsBody = Vector(PUT, POST, PATCH)
-
-  def get(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(GET, uri, params, headers, body)
-
-  def post(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(POST, uri, params, headers, body)
-
-  def put(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(PUT, uri, params, headers, body)
-
-  def patch(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(PATCH, uri, params, headers, body)
-
-  def delete(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(DELETE, uri, params, headers, body)
-
-  def connect(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(CONNECT, uri, params, headers, body)
-
-  def options(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(OPTIONS, uri, params, headers, body)
-
-  def head(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(HEAD, uri, params, headers, body)
-
-  def trace(uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String) =
-    submit(TRACE, uri, params, headers, body)
 
 
   def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String): Future[AhcClientResponse] = {
@@ -368,108 +341,127 @@ class SwaggerApiClient(config: SwaggerConfig) extends Closeable {
   }
 }
 
-class PetsApiClient(client: Client, config: SwaggerConfig) extends JsonMethods {
+abstract class ApiClient(client: Client, config: SwaggerConfig) extends JsonMethods {
+  protected implicit val execContext = client.execContext
 
-  private[this] implicit val formats = config.jsonFormats
+  protected implicit val formats = config.jsonFormats
+
+  protected def process[T](fn: => T): Future[T]  = {
+    val fut = Promise[T]
+    try {
+      val r = fn
+      fut.complete(Right(r))
+    } catch {
+      case t: Throwable => fut.complete(Left(t))
+    }
+    fut
+  }
+}
+
+class PetsApiClient(client: Client, config: SwaggerConfig) extends ApiClient(client, config) {
 
   def getPetById(id: Long): Future[Pet] = {
-    client.get("/pet.json/"+id.toString, Map.empty, Map.empty, "") map { res =>
-      parse(res.body).extract[Pet]
+    client.submit("GET", "/pet.json/"+id.toString, Map.empty, Map.empty, "") flatMap  { res =>
+      process(parse(res.body).extract[Pet])
     }
   }
 
   def addPet(pet: Pet): Future[Pet] = {
-    client.post("/pet.json", Map.empty, Map.empty, compact(render(Extraction.decompose(pet)))) map { res =>
-      parse(res.body).extract[Pet]
+    client.submit("POST", "/pet.json", Map.empty, Map.empty, compact(render(Extraction.decompose(pet)))) flatMap { res =>
+      process(parse(res.body).extract[Pet])
     }
   }
 
   def updatePet(pet: Pet): Future[Pet] = {
-    client.put("/pet.json", Map.empty, Map.empty, compact(render(Extraction.decompose(pet)))) map { res =>
-      parse(res.body).extract[Pet]
+    client.submit("PUT", "/pet.json", Map.empty, Map.empty, compact(render(Extraction.decompose(pet)))) flatMap { res =>
+      process(parse(res.body).extract[Pet])
     }
   }
 
   def findPetsByStatus(status: List[String]): Future[List[Pet]] = {
-    client.get("/pet.json/findPetsByStatus", Map("status" -> status.mkString(",")), Nil, "") map { res =>
-      parse(res.body) match {
-        case JArray(jvs) => jvs map (_.extract[Pet])
-        case jv => List(jv.extract[Pet])
+    client.submit("GET", "/pet.json/findPetsByStatus", Map("status" -> status.mkString(",")), Nil, "") flatMap { res =>
+      process {
+        parse(res.body) match {
+          case JArray(jvs) => jvs map (_.extract[Pet])
+          case jv => List(jv.extract[Pet])
+        }
       }
     }
   }
 
   def findPetsByTags(tags: Iterable[Tag]): Future[List[Pet]] = {
-    client.get("/pet.json/findByTags", Map("tags" -> tags.map(_.name).mkString(",")), Nil, "") map { res =>
-      parse(res.body) match {
-        case JArray(jvs) => jvs map (_.extract[Pet])
-        case jv => List(jv.extract[Pet])
+    client.submit("GET", "/pet.json/findByTags", Map("tags" -> tags.map(_.name).mkString(",")), Nil, "") flatMap { res =>
+      process {
+        parse(res.body) match {
+          case JArray(jvs) => jvs map (_.extract[Pet])
+          case jv => List(jv.extract[Pet])
+        }
       }
     }
   }
 }
 
-class StoreApiClient(client: Client, config: SwaggerConfig) extends JsonMethods {
-  private[this] implicit val formats = config.jsonFormats
+class StoreApiClient(client: Client, config: SwaggerConfig) extends ApiClient(client, config) {
 
   def getOrderById(id: Long): Future[Order] = {
-    client.get("/store.json/order/" + id.toString, Map.empty, Map.empty, null) map { res =>
-      parse(res.body).extract[Order]
+    client.submit("GET", "/store.json/order/" + id.toString, Map.empty, Map.empty, null) flatMap { res =>
+      process(parse(res.body).extract[Order])
     }
   }
 
   def deleteOrder(id: Long): Future[Unit] = {
-    client.delete("/store.json/order/" + id.toString, Map.empty, Map.empty, null) map { _ => ()}
+    client.submit("DELETE", "/store.json/order/" + id.toString, Map.empty, Map.empty, null) flatMap { _ => process(())}
   }
 
   def placeOrder(order: Order): Future[Unit] = {
-    client.post("/store.json/order", Map.empty, Map.empty, null) map { _ => () }
+    client.submit("POST", "/store.json/order", Map.empty, Map.empty, null) flatMap { _ => process(()) }
   }
 }
 
-class UserApiClient(client: Client, config: SwaggerConfig) extends JsonMethods {
-  private[this] implicit val formats = config.jsonFormats
+class UserApiClient(client: Client, config: SwaggerConfig) extends ApiClient(client, config) {
 
   def createUsersWithArrayInput(users: Array[User]): Future[Array[User]] = {
-    client.post("/user.json/createWithList", Map.empty, Map.empty, compact(render(Extraction.decompose(users.toList)))) map { res =>
-      parse(res.body).extract[List[User]].toArray
+    client.submit("POST", "/user.json/createWithList", Map.empty, Map.empty, compact(render(Extraction.decompose(users.toList)))) flatMap { res =>
+      process(parse(res.body).extract[List[User]].toArray)
     }
   }
 
   def createUser(user: User): Future[User] = {
-    client.post("/user.json", Map.empty, Map.empty, compact(render(Extraction.decompose(user)))) map { res =>
-      parse(res.body).extract[User]
+    client.submit("POST", "/user.json", Map.empty, Map.empty, compact(render(Extraction.decompose(user)))) flatMap { res =>
+      process(parse(res.body).extract[User])
     }
   }
 
   def createUsersWithListInput(users: List[User]): Future[List[User]] = {
-    client.post("/user.json/createWithList", Map.empty, Map.empty, compact(render(Extraction.decompose(users)))) map { res =>
-      parse(res.body).extract[List[User]]
+    client.submit("POST",  "/user.json/createWithList", Map.empty, Map.empty, compact(render(Extraction.decompose(users)))) flatMap { res =>
+      process(parse(res.body).extract[List[User]])
     }
   }
 
   def updateUser(username: String, user: User): Future[User] = {
-    client.put("/user.json/" + username, Map.empty, Map.empty, compact(render(Extraction.decompose(user)))) map { res =>
-      parse(res.body).extract[User]
+    client.submit("PUT", "/user.json/" + username, Map.empty, Map.empty, compact(render(Extraction.decompose(user)))) flatMap { res =>
+      process(parse(res.body).extract[User])
     }
   }
 
   def getUserByName(username: String): Future[User] = {
-    client.get("/user.json/" + username, Map.empty, Map.empty, "") map { res => parse(res.body).extract[User] }
+    client.submit("GET", "/user.json/" + username, Map.empty, Map.empty, "") flatMap { res =>
+      process(parse(res.body).extract[User])
+    }
   }
 
 
   def deleteUser(username: String): Future[Unit] = {
-    client.delete("/user.json/" + username, Map.empty, Map.empty, "") map { _ => () }
+    client.submit("DELETE", "/user.json/" + username, Map.empty, Map.empty, "") flatMap { _ => process(()) }
   }
 
   def loginUser(username: String, password: String): Future[User] = {
-    client.get("/user.json/login", Map("username" -> username, "password" -> password), Map.empty, "") map { res =>
-      parse(res.body).extract[User]
+    client.submit("GET", "/user.json/login", Map("username" -> username, "password" -> password), Map.empty, "") flatMap { res =>
+      process(parse(res.body).extract[User])
     }
   }
 
   def logoutUser(): Future[Unit] = {
-    client.get("/user.json/logout", Map.empty, Map.empty, "") map { _ => ()}
+    client.submit("GET", "/user.json/logout", Map.empty, Map.empty, "") flatMap { _ => process(()) }
   }
 }
