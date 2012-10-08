@@ -8,25 +8,18 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import io.{Codec, Source}
 import java.nio.charset.Charset
-import com.wordnik.client.SwaggerConfig.DataFormat
-import java.io.{File, Closeable}
+import java.io.File
 import java.net.URI
 import rl.MapQueryString
 import akka.dispatch.{Promise, ExecutionContext, Future}
-import com.wordnik.model._
+import akka.util.Duration
+import akka.util.duration._
+import org.json4s.JsonAST.JValue
 import org.json4s.jackson.JsonMethods
-import org.json4s._
 
 
-object Client {
+object RestClient {
   val DefaultUserAgent = "SwaggerClient/1.0"
-
-  val DefaultConfig = (
-    new AsyncHttpClientConfig.Builder()
-      setUserAgent DefaultUserAgent
-      setCompressionEnabled true      // enable content-compression
-      setAllowPoolingConnection true  // enable http keep-alive
-      setFollowRedirects false).build()
 
   private implicit def stringWithExt(s: String) = new {
     def isBlank = s == null || s.trim.isEmpty
@@ -121,7 +114,8 @@ object Client {
     override def toString: String = cookies.toString()
   }
 
-  class AhcClientResponse(response: Response)  {
+
+  class RestClientResponse(response: Response) extends ClientResponse {
     val cookies = (response.getCookies.asScala map { cookie =>
       val cko = CookieOptions(cookie.getDomain, cookie.getPath, cookie.getMaxAge)
       cookie.getName -> Cookie(cookie.getName, cookie.getValue)(cko)
@@ -137,12 +131,10 @@ object Client {
 
     val uri = response.getUri
 
-    private[this] var _body: String = null
+    private[this] var _body: JValue = null
 
-    def statusCode = status.code
-    def statusText = status.line
     def body = {
-      if (_body == null) _body = Source.fromInputStream(inputStream).mkString
+      if (_body == null) _body = JsonMethods.parse(inputStream, useBigDecimalForDouble = true)
       _body
     }
 
@@ -156,41 +148,48 @@ object Client {
       } yield charset.toUpperCase.replace("CHARSET=", "").trim
   }
 
-  private object StringHttpMethod {
-    val GET = "GET"
-    val POST = "POST"
-    val DELETE = "DELETE"
-    val PUT = "PUT"
-    val CONNECT = "CONNECT"
-    val HEAD = "HEAD"
-    val OPTIONS = "OPTIONS"
-    val PATCH = "PATCH"
-    val TRACE = "TRACE"
-  }
-}
-object SwaggerConfig {
-  sealed trait DataFormat {
-    def name: String
-    def contentType: String
-  }
-  object DataFormat {
-    case object Json extends DataFormat {
-      val contentType: String = "application/json;charset=utf-8"
 
-      val name: String = "json"
-    }
-    case object XML extends DataFormat {
-      val contentType: String = "application/xml"
-
-      val name: String = "xml"
-    }
-  }
 }
 
-class Client(baseUrl: String, clientConfig: AsyncHttpClientConfig) {
 
-  import Client._
-  import Client.StringHttpMethod._
+trait ClientResponse {
+  def cookies: Map[String, Cookie]
+  def headers: Map[String, Seq[String]]
+  def status: ResponseStatus
+  def contentType: String
+  def mediaType: Option[String]
+  def charset: Option[String]
+  def uri: URI
+  def statusCode: Int = status.code
+  def statusText: String = status.line
+  def body: JValue
+
+}
+
+object StringHttpMethod {
+  val GET = "GET"
+  val POST = "POST"
+  val DELETE = "DELETE"
+  val PUT = "PUT"
+  val CONNECT = "CONNECT"
+  val HEAD = "HEAD"
+  val OPTIONS = "OPTIONS"
+  val PATCH = "PATCH"
+  val TRACE = "TRACE"
+}
+
+class RestClient(config: SwaggerConfig) extends TransportClient {
+
+  protected val baseUrl: String = config.baseUrl
+  protected val clientConfig: AsyncHttpClientConfig = (new AsyncHttpClientConfig.Builder()
+    setUserAgent config.userAgent
+    setRequestTimeoutInMs config.idleTimeout.toMillis.toInt
+    setCompressionEnabled config.enableCompression               // enable content-compression
+    setAllowPoolingConnection true                               // enable http keep-alive
+    setFollowRedirects config.followRedirects).build()
+
+  import RestClient._
+  import StringHttpMethod._
   implicit val execContext = ExecutionContext.fromExecutorService(clientConfig.executorService())
 
   private val mimes = new Mimes {
@@ -241,7 +240,7 @@ class Client(baseUrl: String, clientConfig: AsyncHttpClientConfig) {
   private val allowsBody = Vector(PUT, POST, PATCH)
 
 
-  def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String): Future[AhcClientResponse] = {
+  def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String, timeout: Duration = 5.seconds): Future[RestClientResponse] = {
     val base = URI.create(baseUrl).normalize()
     val u = URI.create(uri).normalize()
     val files = params collect {
@@ -272,6 +271,9 @@ class Client(baseUrl: String, clientConfig: AsyncHttpClientConfig) {
     val req = (requestFactory(method)
       andThen (addHeaders(headers) _)
       andThen (addParameters(method, realParams, isMultipart) _))(reqUri.toASCIIString)
+    val prc = new PerRequestConfig()
+    prc.setRequestTimeoutInMs(timeout.toMillis.toInt)
+    req.setPerRequestConfig(prc)
     if (isMultipart) {
       files foreach { case (nm, file) =>
         req.addBodyPart(new FilePart(nm, file, mimes(file), FileCharset(file).name))
@@ -294,17 +296,17 @@ class Client(baseUrl: String, clientConfig: AsyncHttpClientConfig) {
     }
     if (allowsBody.contains(method.toUpperCase(Locale.ENGLISH)) && body.nonBlank) req.setBody(body)
 
-    val promise = Promise[AhcClientResponse]()
+    val promise = Promise[RestClientResponse]()
     req.execute(async(promise))
     promise
   }
 
   private[this] def defaultWriteContentType(files: Iterable[(String, File)]) = {
-    val value = if (files.nonEmpty) "multipart/form-data" else "application/x-www-form-urlencoded; charset=utf-8"
+    val value = if (files.nonEmpty) "multipart/form-data" else config.dataFormat.contentType
     Map("Content-Type" -> value)
   }
 
-  private def async(promise: Promise[AhcClientResponse]) = new AsyncCompletionHandler[Promise[AhcClientResponse]] {
+  private[this] def async(promise: Promise[RestClientResponse]) = new AsyncCompletionHandler[Future[ClientResponse]] {
 
 
     override def onThrowable(t: Throwable) {
@@ -312,156 +314,10 @@ class Client(baseUrl: String, clientConfig: AsyncHttpClientConfig) {
     }
 
     def onCompleted(response: Response) = {
-      promise.complete(Right(new AhcClientResponse(response)))
+      promise.complete(Right(new RestClientResponse(response)))
     }
   }
 
 
-  def close() = underlying.close()
-}
-case class SwaggerConfig(
-  baseUrl: String,
-  jsonFormats: Formats = DefaultFormats,
-  dataFormat: SwaggerConfig.DataFormat = DataFormat.Json,
-  httpClientConfig: AsyncHttpClientConfig = Client.DefaultConfig)
-
-class SwaggerApiClient(config: SwaggerConfig) extends Closeable {
-
-  private[this] implicit val jsonFormats = config.jsonFormats
-  val baseUrl = config.baseUrl
-  val dataFormat = config.dataFormat
-  private[this] val client = new Client(config.baseUrl, config.httpClientConfig)
-
-  val pets = new PetsApiClient(client, config)
-
-  val store = new StoreApiClient(client, config)
-
-  def close() {
-    client.close()
-  }
-}
-
-abstract class ApiClient(client: Client, config: SwaggerConfig) extends JsonMethods {
-  protected implicit val execContext = client.execContext
-
-  protected implicit val formats = config.jsonFormats
-
-  protected def process[T](fn: => T): Future[T]  = {
-    val fut = Promise[T]
-    try {
-      val r = fn
-      fut.complete(Right(r))
-    } catch {
-      case t: Throwable => fut.complete(Left(t))
-    }
-    fut
-  }
-}
-
-class PetsApiClient(client: Client, config: SwaggerConfig) extends ApiClient(client, config) {
-
-  def getPetById(id: Long): Future[Pet] = {
-    client.submit("GET", "/pet.json/"+id.toString, Map.empty, Map.empty, "") flatMap  { res =>
-      process(parse(res.body).extract[Pet])
-    }
-  }
-
-  def addPet(pet: Pet): Future[Pet] = {
-    client.submit("POST", "/pet.json", Map.empty, Map.empty, compact(render(Extraction.decompose(pet)))) flatMap { res =>
-      process(parse(res.body).extract[Pet])
-    }
-  }
-
-  def updatePet(pet: Pet): Future[Pet] = {
-    client.submit("PUT", "/pet.json", Map.empty, Map.empty, compact(render(Extraction.decompose(pet)))) flatMap { res =>
-      process(parse(res.body).extract[Pet])
-    }
-  }
-
-  def findPetsByStatus(status: List[String]): Future[List[Pet]] = {
-    client.submit("GET", "/pet.json/findPetsByStatus", Map("status" -> status.mkString(",")), Nil, "") flatMap { res =>
-      process {
-        parse(res.body) match {
-          case JArray(jvs) => jvs map (_.extract[Pet])
-          case jv => List(jv.extract[Pet])
-        }
-      }
-    }
-  }
-
-  def findPetsByTags(tags: Iterable[Tag]): Future[List[Pet]] = {
-    client.submit("GET", "/pet.json/findByTags", Map("tags" -> tags.map(_.name).mkString(",")), Nil, "") flatMap { res =>
-      process {
-        parse(res.body) match {
-          case JArray(jvs) => jvs map (_.extract[Pet])
-          case jv => List(jv.extract[Pet])
-        }
-      }
-    }
-  }
-}
-
-class StoreApiClient(client: Client, config: SwaggerConfig) extends ApiClient(client, config) {
-
-  def getOrderById(id: Long): Future[Order] = {
-    client.submit("GET", "/store.json/order/" + id.toString, Map.empty, Map.empty, null) flatMap { res =>
-      process(parse(res.body).extract[Order])
-    }
-  }
-
-  def deleteOrder(id: Long): Future[Unit] = {
-    client.submit("DELETE", "/store.json/order/" + id.toString, Map.empty, Map.empty, null) flatMap { _ => process(())}
-  }
-
-  def placeOrder(order: Order): Future[Unit] = {
-    client.submit("POST", "/store.json/order", Map.empty, Map.empty, null) flatMap { _ => process(()) }
-  }
-}
-
-class UserApiClient(client: Client, config: SwaggerConfig) extends ApiClient(client, config) {
-
-  def createUsersWithArrayInput(users: Array[User]): Future[Array[User]] = {
-    client.submit("POST", "/user.json/createWithList", Map.empty, Map.empty, compact(render(Extraction.decompose(users.toList)))) flatMap { res =>
-      process(parse(res.body).extract[List[User]].toArray)
-    }
-  }
-
-  def createUser(user: User): Future[User] = {
-    client.submit("POST", "/user.json", Map.empty, Map.empty, compact(render(Extraction.decompose(user)))) flatMap { res =>
-      process(parse(res.body).extract[User])
-    }
-  }
-
-  def createUsersWithListInput(users: List[User]): Future[List[User]] = {
-    client.submit("POST",  "/user.json/createWithList", Map.empty, Map.empty, compact(render(Extraction.decompose(users)))) flatMap { res =>
-      process(parse(res.body).extract[List[User]])
-    }
-  }
-
-  def updateUser(username: String, user: User): Future[User] = {
-    client.submit("PUT", "/user.json/" + username, Map.empty, Map.empty, compact(render(Extraction.decompose(user)))) flatMap { res =>
-      process(parse(res.body).extract[User])
-    }
-  }
-
-  def getUserByName(username: String): Future[User] = {
-    client.submit("GET", "/user.json/" + username, Map.empty, Map.empty, "") flatMap { res =>
-      process(parse(res.body).extract[User])
-    }
-  }
-
-
-  def deleteUser(username: String): Future[Unit] = {
-    client.submit("DELETE", "/user.json/" + username, Map.empty, Map.empty, "") flatMap { _ => process(()) }
-  }
-
-  def loginUser(username: String, password: String): Future[User] = {
-    client.submit("GET", "/user.json/login", Map("username" -> username, "password" -> password), Map.empty, "") flatMap { res =>
-      process(parse(res.body).extract[User])
-    }
-  }
-
-  def logoutUser(): Future[Unit] = {
-    client.submit("GET", "/user.json/logout", Map.empty, Map.empty, "") flatMap { _ => process(()) }
-  }
+  def close() = underlying.closeAsynchronously()
 }

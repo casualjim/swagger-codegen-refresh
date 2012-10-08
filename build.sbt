@@ -11,6 +11,8 @@ libraryDependencies ++= Seq(
   "org.json4s"                       %% "json4s-jackson"     % "3.0.0-SNAPSHOT",
   "io.backchat.inflector"            %% "scala-inflector"    % "1.3.4",
   "io.backchat.rl"                   %% "rl"                 % "0.3.2",
+  "org.slf4j"                         % "slf4j-api"          % "1.7.1",
+  "ch.qos.logback"                    % "logback-classic"    % "1.0.7" % "provided;test",
   "eu.medsea.mimeutil"                % "mime-util"          % "2.1.3" exclude("org.slf4j", "slf4j-log4j12") exclude("log4j", "log4j"),
   "com.googlecode.juniversalchardet"  % "juniversalchardet"  % "1.0.3",
   "com.typesafe.akka"                 % "akka-actor"         % "2.0.3" // This akka dependency can be removed in scala 2.10
