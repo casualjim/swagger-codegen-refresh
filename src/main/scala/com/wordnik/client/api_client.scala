@@ -9,12 +9,6 @@ import com.wordnik.model.{User, Order, Tag, Pet}
 import com.wordnik.client.SwaggerConfig.DataFormat
 import org.json4s._
 import org.json4s.Xml._
-import scala.Left
-import scala.Right
-import com.wordnik.model.Pet
-import com.wordnik.model.User
-import com.wordnik.model.Tag
-import com.wordnik.model.Order
 import io.Codec
 
 object SwaggerConfig {

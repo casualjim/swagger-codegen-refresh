@@ -16,7 +16,6 @@ import java.nio.charset.Charset
 import io.Codec
 import java.util.concurrent.atomic.AtomicBoolean
 import com.wordnik.client.RestClient.CookieOptions
-import com.wordnik.client.ClientResponse
 
 object SwaggerSocketClient {
   sealed trait SwaggerSocketMessage
@@ -84,12 +83,12 @@ object SwaggerSocketClient {
   case class StatusMessage(status: Status, identity: String) extends SwaggerSocketMessage
 
   object SwaggerSocketResponse {
-    def apply(resp: Response): ClientResponse = new SwaggerSocketResponse(resp)
+    def apply(config: SwaggerConfig)(resp: Response): ClientResponse = new SwaggerSocketResponse(resp, config)
   }
-  class SwaggerSocketResponse(resp: Response) extends ClientResponse {
+  class SwaggerSocketResponse(resp: Response, config: SwaggerConfig) extends ClientResponse {
     val uri: URI = URI.create(resp.path)
 
-    val body: String = JsonMethods.compact(JsonMethods.render(resp.messageBody))
+    val body = resp.messageBody
 
     val cookies: Map[String, RestClient.Cookie] = {
       val allCks = mutable.Map.empty[String, RestClient.Cookie]
@@ -229,6 +228,6 @@ class SwaggerSocketClient(config: SwaggerConfig) extends TransportClient {
       }
     }
     webSocket.sendTextMessage(config.dataFormat.serialize(RequestEnvelope(config.identity, List(req))))
-    promise map SwaggerSocketResponse.apply
+    promise map SwaggerSocketResponse(config)
   }
 }

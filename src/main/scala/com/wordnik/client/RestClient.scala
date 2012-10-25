@@ -121,7 +121,7 @@ object RestClient {
       cookie.getName -> Cookie(cookie.getName, cookie.getValue)(cko)
     }).toMap
 
-    val headers = (response.getHeaders.keySet().asScala map { k => k -> response.getHeaders(k).asScala.mkString("; ")}).toMap
+    val headers = (response.getHeaders.keySet().asScala map { k => k -> response.getHeaders(k).asScala.toSeq}).toMap
 
     val status = ResponseStatus(response.getStatusCode, response.getStatusText)
 
@@ -139,11 +139,11 @@ object RestClient {
     }
 
     private[this] def nioCharset = charset map Charset.forName getOrElse Codec.UTF8
-    def mediaType: Option[String] = headers.get("Content-Type") flatMap { _.split(";").headOption }
+    def mediaType: Option[String] = headers.get("Content-Type") flatMap { _.headOption }
 
     def charset: Option[String] =
       for {
-        ct <- headers.get("Content-Type")
+        ct <- mediaType
         charset <- ct.split(";").drop(1).headOption
       } yield charset.toUpperCase.replace("CHARSET=", "").trim
   }
@@ -153,7 +153,7 @@ object RestClient {
 
 
 trait ClientResponse {
-  def cookies: Map[String, Cookie]
+  def cookies: Map[String, RestClient.Cookie]
   def headers: Map[String, Seq[String]]
   def status: ResponseStatus
   def contentType: String
